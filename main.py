@@ -1,391 +1,627 @@
 #!/usr/bin/env python3
-"""Make the AI judge excited — ai-excited-01.
+"""Koi to Dragon — a golden koi leaps out of dark water and becomes a dragon
+mid-leap, silhouetted against a huge gold moon.
 
-A program that draws ONE image, deterministically, with the Python standard
-library only (no network, no randomness, no clock), and writes it to
-/output/entry.png (or $MAKEFUN_OUTPUT_DIR/entry.png).
+Drawn from scratch with the Python standard library only. The scene is
+rasterised on a 2x supersampled canvas, downsampled to 1024x1024, given a
+soft glow pass, and written out as a deterministic PNG: running this program
+twice produces byte-identical output.
 
-The image: a golden koi leaps out of dark water and becomes a dragon
-mid-leap, its head a dark silhouette backlit by a huge gold moon, one glowing
-slit-pupil eye. One big arcing body, one huge moon disc: the idea reads at
-300px. The twist is the transformation itself (fish -> dragon, lit body ->
-shadow head), the momentum is the leap, and the style is clean flat vector
-with a dark outline — no anatomy to break, no text at all.
-
-Determinism: fixed constants only; the PNG encoder writes no timestamp
-chunk; running twice produces identical bytes.
-
-R8 (recorded polish pass, 2026-11-16): scale rows + dorsal fin along the
-body, layered mane flames, bigger eye / jaw rim-light / attached mouth
-flame, bigger forked tail fin with a splash crown, fewer spray droplets
-in a clean arc, thicker motion streaks, softer moon halo (no disc edge),
-shooting star + more stars in the empty left sky.
+Usage: python3 main.py  ->  writes /output/entry.png
+       OUT=/some/path.png python3 main.py  ->  writes there instead.
 """
+
+import binascii
+import math
 import os
 import struct
 import zlib
 
-W = 1024
-H = 1024
+# ---------------------------------------------------------------------------
+# PNG encoding (stdlib only)
+# ---------------------------------------------------------------------------
 
-# ---------------------------------------------------------------- canvas
-class Canvas:
-    def __init__(self, w, h):
-        self.w = w
-        self.h = h
-        self.px = bytearray(w * h * 3)
-
-    def set(self, x, y, r, g, b):
-        if 0 <= x < self.w and 0 <= y < self.h:
-            i = (y * self.w + x) * 3
-            self.px[i] = r
-            self.px[i + 1] = g
-            self.px[i + 2] = b
-
-    def blend(self, x, y, r, g, b, a):
-        """Blend colour over pixel with alpha a (0..255)."""
-        if 0 <= x < self.w and 0 <= y < self.h and a > 0:
-            i = (y * self.w + x) * 3
-            ia = 255 - a
-            self.px[i] = (r * a + self.px[i] * ia) // 255
-            self.px[i + 1] = (g * a + self.px[i + 1] * ia) // 255
-            self.px[i + 2] = (b * a + self.px[i + 2] * ia) // 255
-
-    def disc(self, cx, cy, rad, color, alpha=255):
-        r0, g0, b0 = color
-        x0 = max(0, int(cx - rad))
-        x1 = min(self.w - 1, int(cx + rad) + 1)
-        y0 = max(0, int(cy - rad))
-        y1 = min(self.h - 1, int(cy + rad) + 1)
-        r2 = rad * rad
-        for y in range(y0, y1 + 1):
-            dy = y - cy
-            for x in range(x0, x1 + 1):
-                dx = x - cx
-                if dx * dx + dy * dy <= r2:
-                    if alpha == 255:
-                        self.set(x, y, r0, g0, b0)
-                    else:
-                        self.blend(x, y, r0, g0, b0, alpha)
-
-    def radial(self, cx, cy, rad, inner, outer):
-        """Radial gradient disc: inner colour at centre -> outer at edge."""
-        x0 = max(0, int(cx - rad))
-        x1 = min(self.w - 1, int(cx + rad) + 1)
-        y0 = max(0, int(cy - rad))
-        y1 = min(self.h - 1, int(cy + rad) + 1)
-        for y in range(y0, y1 + 1):
-            dy = (y - cy) / rad
-            for x in range(x0, x1 + 1):
-                dx = (x - cx) / rad
-                d = (dx * dx + dy * dy) ** 0.5
-                if d <= 1.0:
-                    t = d
-                    r = int(inner[0] + (outer[0] - inner[0]) * t)
-                    g = int(inner[1] + (outer[1] - inner[1]) * t)
-                    b = int(inner[2] + (outer[2] - inner[2]) * t)
-                    self.set(x, y, r, g, b)
-
-    def vgrad(self, y0, y1, top, bottom):
-        for y in range(y0, y1):
-            t = (y - y0) / max(1, y1 - y0 - 1)
-            r = int(top[0] + (bottom[0] - top[0]) * t)
-            g = int(top[1] + (bottom[1] - top[1]) * t)
-            b = int(top[2] + (bottom[2] - top[2]) * t)
-            base = (y * self.w) * 3
-            for x in range(self.w):
-                i = base + x * 3
-                self.px[i] = r
-                self.px[i + 1] = g
-                self.px[i + 2] = b
-
-    def poly(self, pts, color, alpha=255):
-        """Scanline polygon fill."""
-        if len(pts) < 3:
-            return
-        r0, g0, b0 = color
-        ys = [p[1] for p in pts]
-        y0 = max(0, int(min(ys)))
-        y1 = min(self.h - 1, int(max(ys)) + 1)
-        n = len(pts)
-        for y in range(y0, y1 + 1):
-            xs = []
-            for i in range(n):
-                x1, y1p = pts[i]
-                x2, y2p = pts[(i + 1) % n]
-                if (y1p <= y < y2p) or (y2p <= y < y1p):
-                    t = (y - y1p) / (y2p - y1p)
-                    xs.append(x1 + t * (x2 - x1))
-            xs.sort()
-            for k in range(0, len(xs) - 1, 2):
-                xa = max(0, int(xs[k]))
-                xb = min(self.w - 1, int(xs[k + 1]) + 1)
-                for x in range(xa, xb + 1):
-                    if alpha == 255:
-                        self.set(x, y, r0, g0, b0)
-                    else:
-                        self.blend(x, y, r0, g0, b0, alpha)
-
-    def thick_line(self, x0, y0, x1, y1, width, color, alpha=255):
-        """Line drawn as a chain of discs (round caps)."""
-        import math
-        dist = math.hypot(x1 - x0, y1 - y0)
-        steps = max(1, int(dist / max(1.0, width * 0.45)))
-        for i in range(steps + 1):
-            t = i / steps
-            self.disc(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t,
-                      width / 2.0, color, alpha)
-
-    def quad(self, x0, y0, cx, cy, x1, y1, width, color, alpha=255):
-        """Quadratic bezier as thick line segments."""
-        import math
-        steps = 24
-        px, py = x0, y0
-        for i in range(1, steps + 1):
-            t = i / steps
-            mt = 1 - t
-            x = mt * mt * x0 + 2 * mt * t * cx + t * t * x1
-            y = mt * mt * y0 + 2 * mt * t * cy + t * t * y1
-            self.thick_line(px, py, x, y, width, color, alpha)
-            px, py = x, y
-
-
-def catmull_rom(points, samples):
-    """Sample a Catmull-Rom spline through points; returns list of (x, y)."""
-    pts = [points[0]] + list(points) + [points[-1]]
-    out = []
-    for i in range(len(pts) - 3):
-        p0, p1, p2, p3 = pts[i], pts[i + 1], pts[i + 2], pts[i + 3]
-        for j in range(samples):
-            t = j / samples
-            t2 = t * t
-            t3 = t2 * t
-            x = 0.5 * ((2 * p1[0]) + (-p0[0] + p2[0]) * t +
-                       (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * t2 +
-                       (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * t3)
-            y = 0.5 * ((2 * p1[1]) + (-p0[1] + p2[1]) * t +
-                       (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * t2 +
-                       (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * t3)
-            out.append((x, y))
-    out.append(points[-1])
+def _chunk(kind, data):
+    out = struct.pack(">I", len(data)) + kind + data
+    out += struct.pack(">I", binascii.crc32(kind + data) & 0xFFFFFFFF)
     return out
 
 
-# ------------------------------------------------------------------ scene
-def lerp(a, b, t):
-    return a + (b - a) * t
-
-
-def draw_scene():
-    cv = Canvas(W, H)
-    # --- sky: deep indigo -> violet horizon, water below (soft blend)
-    cv.vgrad(0, 700, (10, 14, 46), (26, 48, 92))
-    cv.vgrad(700, H, (26, 48, 92), (5, 30, 46))
-
-    # --- stars (fixed positions, deterministic)
-    stars = [(60, 80, 2), (180, 50, 1), (320, 110, 2), (430, 60, 1), (540, 90, 2),
-             (880, 70, 2), (960, 150, 1), (120, 200, 1), (250, 260, 1), (40, 320, 2),
-             (920, 260, 2), (980, 380, 1), (80, 430, 1), (350, 180, 1), (640, 60, 1),
-             (760, 120, 1), (500, 200, 1), (200, 380, 2), (60, 540, 1), (940, 480, 2)]
-    for (x, y, r) in stars:
-        cv.disc(x, y, r, (255, 244, 214), 200)
-    # a few more stars in the empty left half, plus one shooting star for
-    # energy in the dark sky (R7: ~40% of the frame was empty darkness)
-    for (x, y, r) in [(150, 120, 2), (90, 260, 1), (300, 320, 2), (420, 140, 1),
-                      (60, 640, 2), (880, 420, 1), (960, 560, 2), (480, 120, 1)]:
-        cv.disc(x, y, r, (255, 244, 214), 200)
-    cv.thick_line(120, 100, 210, 165, 4, (255, 244, 214), 200)
-    cv.thick_line(210, 165, 235, 183, 2, (255, 244, 214), 120)
-    cv.disc(118, 98, 4, (255, 255, 255), 230)
-
-    # --- gold moon, upper right: halo fades into the local sky colour.
-    # Outer colour matches the sky gradient at this height (~16,26,63) so
-    # the halo has no visible disc edge (R7 flaw); a second, wider, fainter
-    # ring softens it further.
-    cv.radial(650, 250, 380, (34, 44, 86), (13, 21, 56))
-    cv.radial(650, 250, 290, (255, 200, 90), (16, 26, 63))
-    cv.radial(650, 250, 150, (255, 233, 168), (245, 158, 44))
-    for (x, y, r) in [(605, 210, 13), (695, 285, 10), (650, 300, 8)]:
-        cv.disc(x, y, r, (232, 148, 40), 80)
-
-    # --- moon reflection: three small gold dashes on the water, nothing more
-    for (x, y, w, a) in [(610, 900, 80, 200), (625, 930, 55, 220), (600, 960, 100, 180)]:
-        cv.poly([(x, y), (x + w, y), (x + w - 10, y + 5), (x + 10, y + 5)],
-                (255, 201, 94), a)
-
-    # --- body spline: a real leap arc — steep rise from the water, flattening
-    # into the head at the apex. Tail (in water, bottom-left) -> head (top-right).
-    spine = [(170, 905), (205, 800), (280, 680), (390, 565), (520, 465),
-             (645, 375), (740, 305), (795, 265)]
-    pts = catmull_rom(spine, 14)
-
-    def radius_at(t):
-        if t < 0.45:
-            return lerp(22, 80, t / 0.45)
-        return lerp(80, 48, (t - 0.45) / 0.55)
-
-    def color_at(t):
-        if t < 0.30:
-            u = t / 0.30
-            return (255, int(lerp(107, 160, u)), int(lerp(26, 60, u)))
-        u = (t - 0.30) / 0.70
-        return (255, int(lerp(160, 181, u)), int(lerp(60, 46, u)))
-
-    n = len(pts)
-    # --- dark outline pass: slightly larger discs first, so the creature pops
-    # off the moon and sky like a clean sticker (flat-vector style).
-    for i, (x, y) in enumerate(pts):
-        t = i / max(1, n - 1)
-        cv.disc(x - 3, y - 4, radius_at(t) + 6, (16, 20, 50))
-    # --- tail fin: two flowing lobes (curved, not angular), bigger and
-    # clearly forked (R7: small lobes lost in the spray clutter)
-    cv.quad(170, 905, 90, 850, 45, 875, 28, (255, 122, 31))
-    cv.quad(170, 905, 95, 888, 50, 908, 18, (255, 244, 224))
-    cv.quad(170, 905, 100, 965, 60, 990, 28, (255, 122, 31))
-    cv.quad(170, 905, 110, 955, 75, 985, 16, (255, 244, 224))
-    # splash crown where the tail leaves the water: three white arcs
-    for (sx, sy, ex, ey) in [(130, 905, 165, 880), (150, 920, 190, 900),
-                             (120, 930, 160, 915)]:
-        cv.quad(sx, sy, (sx + ex) // 2, min(sy, ey) - 12, ex, ey, 5,
-                (255, 255, 255), 200)
-    # --- body: overlapping discs along the spline
-    for i, (x, y) in enumerate(pts):
-        t = i / max(1, n - 1)
-        cv.disc(x, y, radius_at(t), color_at(t))
-    # belly: soft pale wash on the lower side (subtle, not a cream stripe)
-    for i, (x, y) in enumerate(pts):
-        t = i / max(1, n - 1)
-        if 0.2 < t < 0.8:
-            cv.disc(x - radius_at(t) * 0.15, y + radius_at(t) * 0.45,
-                    radius_at(t) * 0.30, (255, 233, 168), 25)
-    # koi patches on the tail third: white blotches + black spots
-    for (x, y, r, c, a) in [(235, 830, 30, (255, 244, 224), 215),
-                            (305, 725, 24, (255, 244, 224), 195),
-                            (275, 775, 12, (26, 22, 46), 235),
-                            (345, 685, 10, (26, 22, 46), 235),
-                            (215, 865, 9, (26, 22, 46), 210),
-                            (255, 860, 8, (26, 22, 46), 210)]:
-        cv.disc(x, y, r, c, a)
-    # scale rows along the whole gold body (R7: the body was a smooth tube).
-    # Scallop arcs follow the spine; a second, offset row lower down gives
-    # real koi texture without any anatomy to break.
-    for i in range(8, n - 6, 7):
-        x, y = pts[i]
-        t = i / (n - 1)
-        r = radius_at(t)
-        cv.quad(x - r * 0.55, y - r * 0.1, x, y + r * 0.5, x + r * 0.55, y - r * 0.1,
-                5, (200, 110, 10), 130)
-    for i in range(12, n - 6, 7):
-        x, y = pts[i]
-        t = i / (n - 1)
-        r = radius_at(t)
-        cv.quad(x - r * 0.45, y + r * 0.15, x, y + r * 0.65, x + r * 0.45, y + r * 0.15,
-                4, (214, 130, 20), 110)
-    # dorsal fin: small flame tufts along the upper edge of the spine, tips
-    # sweeping back. The spine runs up-right, so the upper-left normal is
-    # about (-0.62, -0.78); fins grow out along it.
-    for i in range(10, 62, 9):
-        x, y = pts[i]
-        t = i / (n - 1)
-        r = radius_at(t)
-        bx, by = x - 0.62 * r * 0.75, y - 0.78 * r * 0.75
-        tipx, tipy = x - 0.62 * r * 1.55, y - 0.78 * r * 1.55
-        cv.poly([(bx - r * 0.30, by + r * 0.18), (tipx, tipy),
-                 (bx + r * 0.30, by + r * 0.10)], (200, 110, 10))
-        cv.poly([(bx - r * 0.18, by + r * 0.12), (tipx + r * 0.06, tipy + r * 0.08),
-                 (bx + r * 0.18, by + r * 0.06)], (255, 181, 50))
-
-    # --- mane: three big flame tufts on the neck, sweeping back.
-    # Layered now (R7: flat paper triangles) — dark outline, gold body,
-    # pale inner flame — so each tuft reads as a flame, not a cutout.
-    for (bx, by, tipx, tipy, wdt) in [(655, 395, 600, 300, 46),
-                                      (700, 350, 660, 255, 52),
-                                      (745, 315, 720, 225, 44)]:
-        cv.poly([(bx - wdt // 2 - 6, by + 26), (tipx - 4, tipy - 6),
-                 (bx + wdt // 2 + 6, by + 20)], (200, 110, 10))
-        cv.poly([(bx - wdt // 2, by + 20), (tipx, tipy),
-                 (bx + wdt // 2, by + 14)], (232, 138, 20))
-        cv.poly([(bx - wdt // 4, by + 12), (tipx + 8, tipy + 12),
-                 (bx + wdt // 4, by + 8)], (255, 201, 60))
-        cv.poly([(bx - wdt // 8, by + 6), (tipx + 12, tipy + 22),
-                 (bx + wdt // 8, by + 4)], (255, 233, 168))
-
-    # --- head: a dark silhouette BACKLIT by the moon (inside the moon disc).
-    # One clean profile polygon with an open-mouth notch; a glowing eye and a
-    # gold rim-light are the only details — nothing anatomical to break.
-    hx, hy = 720, 290
-    cv.poly([(660, 335), (680, 260), (700, 232), (625, 150), (690, 195),
-             (745, 218), (800, 205), (852, 225), (862, 242), (848, 258),
-             (795, 264), (845, 286), (830, 302), (775, 312), (720, 335)],
-            (18, 16, 44))
-    # second horn silhouette behind the first
-    cv.poly([(700, 225), (655, 140), (700, 195), (725, 215)], (18, 16, 44))
-    # gold rim-light along the top edge of the silhouette
-    cv.thick_line(680, 258, 700, 232, 5, (255, 201, 60), 220)
-    cv.thick_line(700, 232, 745, 218, 5, (255, 201, 60), 220)
-    cv.thick_line(745, 218, 800, 205, 5, (255, 201, 60), 220)
-    # glowing dragon eye: bigger and brighter (R7: small and easy to miss)
-    cv.disc(762, 248, 16, (255, 201, 60))
-    cv.disc(762, 248, 10, (255, 233, 168))
-    cv.poly([(762, 238), (767, 248), (762, 258), (757, 248)], (20, 16, 40))
-    cv.disc(766, 244, 3, (255, 255, 255), 230)
-    # nostril dot on the snout + gold rim-light along the lower jaw, so the
-    # silhouette reads as a head, not a bird/shark blob
-    cv.disc(842, 238, 4, (255, 201, 60), 220)
-    cv.thick_line(720, 335, 775, 312, 5, (255, 201, 60), 200)
-    cv.thick_line(775, 312, 830, 302, 5, (255, 201, 60), 200)
-    # fire inside the open mouth: a teardrop polygon that touches the mouth
-    # edges on both sides (R7: two floating discs, detached from the snout)
-    cv.poly([(812, 260), (838, 256), (846, 272), (828, 286), (812, 278)],
-            (255, 170, 30))
-    cv.poly([(820, 264), (836, 262), (840, 272), (828, 280)], (255, 233, 168))
-    # whiskers trailing back from the snout
-    cv.quad(830, 268, 780, 320, 720, 335, 5, (255, 233, 168))
-    cv.quad(825, 278, 775, 335, 715, 350, 4, (255, 201, 60))
-
-    # --- spray: fewer, larger droplets in a clear rising arc (R7: twelve
-    # random dots + a stray cyan streak read as clutter, not spray)
-    spray = [(150, 885, 8), (120, 850, 6), (200, 860, 7), (230, 820, 6),
-             (265, 780, 7), (300, 730, 5), (335, 670, 5), (115, 940, 7)]
-    for (x, y, r) in spray:
-        cv.disc(x, y, r, (255, 255, 255), 210)
-        cv.disc(x, y, max(1, r - 2), (255, 233, 168), 220)
-    # motion streaks behind the leap: thicker and brighter (R7: thin/faint)
-    for (x0, y0, x1, y1, w) in [(310, 790, 390, 715, 10), (430, 700, 505, 630, 9),
-                                (520, 580, 590, 515, 9), (250, 840, 320, 775, 8)]:
-        cv.thick_line(x0, y0, x1, y1, w, (255, 201, 60), 200)
-    return cv
-
-
-# ------------------------------------------------------------------- png
-def chunk(typ, data):
-    c = struct.pack(">I", len(data)) + typ + data
-    c += struct.pack(">I", zlib.crc32(typ + data) & 0xFFFFFFFF)
-    return c
-
-
-def write_png(cv, path):
+def encode_png(rgb, width, height):
+    """Encode a flat RGB bytes buffer (row-major, 3 bytes per pixel)."""
     raw = bytearray()
-    w = cv.w
-    for y in range(cv.h):
-        raw.append(0)  # filter: None
-        base = y * w * 3
-        raw += cv.px[base:base + w * 3]
-    data = b"\x89PNG\r\n\x1a\n"
-    data += chunk(b"IHDR", struct.pack(">IIBBBBB", w, cv.h, 8, 2, 0, 0, 0))
-    data += chunk(b"IDAT", zlib.compress(bytes(raw), 9))
-    data += chunk(b"IEND", b"")
-    with open(path, "wb") as f:
-        f.write(data)
-    return len(data)
+    stride = width * 3
+    for y in range(height):
+        raw.append(0)  # filter: none
+        raw += rgb[y * stride:(y + 1) * stride]
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _chunk(b"IHDR", ihdr)
+        + _chunk(b"IDAT", zlib.compress(bytes(raw), 6))
+        + _chunk(b"IEND", b"")
+    )
+
+
+# ---------------------------------------------------------------------------
+# Canvas: a supersampled RGB buffer with flat-vector drawing primitives.
+# Design coordinates are 0..1024; SS scales them to the backing buffer.
+# ---------------------------------------------------------------------------
+
+SS = 2            # supersample factor
+SIZE = 1024       # design size (output is SIZE x SIZE)
+W = SIZE * SS     # backing buffer width/height in pixels
+
+
+class Canvas:
+    def __init__(self):
+        self.buf = bytearray(W * W * 3)
+
+    # -- low level ------------------------------------------------------
+    def _off(self, x, y):
+        return (y * W + x) * 3
+
+    def blend_px(self, x, y, rgb, alpha):
+        """Blend one backing-buffer pixel towards rgb by alpha (0..1)."""
+        if x < 0 or y < 0 or x >= W or y >= W:
+            return
+        o = self._off(x, y)
+        ia = 1.0 - alpha
+        self.buf[o] = int(self.buf[o] * ia + rgb[0] * alpha + 0.5)
+        self.buf[o + 1] = int(self.buf[o + 1] * ia + rgb[1] * alpha + 0.5)
+        self.buf[o + 2] = int(self.buf[o + 2] * ia + rgb[2] * alpha + 0.5)
+
+    def span(self, y, x0, x1, rgb, alpha=1.0):
+        """Fill backing-buffer row y from x0 to x1 (inclusive) solid."""
+        if y < 0 or y >= W:
+            return
+        x0 = max(0, int(math.floor(x0)))
+        x1 = min(W - 1, int(math.ceil(x1)))
+        if x1 < x0:
+            return
+        if alpha >= 1.0:
+            pat = bytes(rgb) * (x1 - x0 + 1)
+            o = self._off(x0, y)
+            self.buf[o:o + len(pat)] = pat
+        else:
+            for x in range(x0, x1 + 1):
+                self.blend_px(x, y, rgb, alpha)
+
+    # -- shapes (design coordinates) ------------------------------------
+    def poly(self, pts, rgb, alpha=1.0):
+        """Scanline-fill a polygon given in design coordinates."""
+        if len(pts) < 3:
+            return
+        p = [(x * SS, y * SS) for x, y in pts]
+        n = len(p)
+        ymin = max(0, int(math.floor(min(q[1] for q in p))))
+        ymax = min(W - 1, int(math.ceil(max(q[1] for q in p))))
+        edges = []
+        for i in range(n):
+            x0, y0 = p[i]
+            x1, y1 = p[(i + 1) % n]
+            if y0 == y1:
+                continue
+            edges.append((x0, y0, x1, y1))
+        for y in range(ymin, ymax + 1):
+            yc = y + 0.5
+            xs = []
+            for x0, y0, x1, y1 in edges:
+                if (y0 <= yc < y1) or (y1 <= yc < y0):
+                    xs.append(x0 + (yc - y0) * (x1 - x0) / (y1 - y0))
+            xs.sort()
+            for i in range(0, len(xs) - 1, 2):
+                self.span(y, xs[i], xs[i + 1], rgb, alpha)
+
+    def disc(self, cx, cy, r, rgb, alpha=1.0):
+        """Filled circle, design coordinates."""
+        cx *= SS
+        cy *= SS
+        r *= SS
+        y0 = max(0, int(math.floor(cy - r)))
+        y1 = min(W - 1, int(math.ceil(cy + r)))
+        for y in range(y0, y1 + 1):
+            dy = (y + 0.5) - cy
+            h2 = r * r - dy * dy
+            if h2 <= 0:
+                continue
+            h = math.sqrt(h2)
+            self.span(y, cx - h, cx + h, rgb, alpha)
+
+    def ellipse(self, cx, cy, rx, ry, rgb, alpha=1.0):
+        cx *= SS
+        cy *= SS
+        rx *= SS
+        ry *= SS
+        y0 = max(0, int(math.floor(cy - ry)))
+        y1 = min(W - 1, int(math.ceil(cy + ry)))
+        for y in range(y0, y1 + 1):
+            dy = ((y + 0.5) - cy) / ry
+            h2 = 1.0 - dy * dy
+            if h2 <= 0:
+                continue
+            h = math.sqrt(h2) * rx
+            self.span(y, cx - h, cx + h, rgb, alpha)
+
+    def stroke(self, pts, width, rgb, alpha=1.0):
+        """Thick polyline through design-coordinate points."""
+        if len(pts) < 2:
+            return
+        w = width * SS / 2.0
+        for i in range(len(pts) - 1):
+            x0, y0 = pts[i][0] * SS, pts[i][1] * SS
+            x1, y1 = pts[i + 1][0] * SS, pts[i + 1][1] * SS
+            dx, dy = x1 - x0, y1 - y0
+            ln = math.hypot(dx, dy)
+            if ln == 0:
+                continue
+            nx, ny = -dy / ln * w, dx / ln * w
+            self.poly(
+                [
+                    ((x0 + nx) / SS, (y0 + ny) / SS),
+                    ((x1 + nx) / SS, (y1 + ny) / SS),
+                    ((x1 - nx) / SS, (y1 - ny) / SS),
+                    ((x0 - nx) / SS, (y0 - ny) / SS),
+                ],
+                rgb,
+                alpha,
+            )
+            self.disc(pts[i][0], pts[i][1], width / 2.0, rgb, alpha)
+        self.disc(pts[-1][0], pts[-1][1], width / 2.0, rgb, alpha)
+
+    def arc_stroke(self, cx, cy, rx, ry, a0, a1, width, rgb, alpha=1.0, steps=48):
+        """Stroke an elliptical arc (angles in radians)."""
+        pts = []
+        for i in range(steps + 1):
+            a = a0 + (a1 - a0) * i / steps
+            pts.append((cx + rx * math.cos(a), cy + ry * math.sin(a)))
+        self.stroke(pts, width, rgb, alpha)
+
+    def vgrad(self, stops):
+        """Vertical gradient. stops: list of (y_design, (r,g,b))."""
+        for y in range(W):
+            yd = y / SS
+            col = stops[-1][1]
+            for i in range(len(stops) - 1):
+                y0, c0 = stops[i]
+                y1, c1 = stops[i + 1]
+                if y0 <= yd <= y1:
+                    t = 0.0 if y1 == y0 else (yd - y0) / (y1 - y0)
+                    col = (
+                        int(c0[0] + (c1[0] - c0[0]) * t + 0.5),
+                        int(c0[1] + (c1[1] - c0[1]) * t + 0.5),
+                        int(c0[2] + (c1[2] - c0[2]) * t + 0.5),
+                    )
+                    break
+            self.span(y, 0, W - 1, col)
+
+
+def cubic(p0, p1, p2, p3, t):
+    """Point on a cubic bezier at t, plus the tangent angle."""
+    mt = 1.0 - t
+    x = mt**3 * p0[0] + 3 * mt * mt * t * p1[0] + 3 * mt * t * t * p2[0] + t**3 * p3[0]
+    y = mt**3 * p0[1] + 3 * mt * mt * t * p1[1] + 3 * mt * t * t * p2[1] + t**3 * p3[1]
+    dx = 3 * mt * mt * (p1[0] - p0[0]) + 6 * mt * t * (p2[0] - p1[0]) + 3 * t * t * (p3[0] - p2[0])
+    dy = 3 * mt * mt * (p1[1] - p0[1]) + 6 * mt * t * (p2[1] - p1[1]) + 3 * t * t * (p3[1] - p2[1])
+    return (x, y), math.atan2(dy, dx)
+
+
+def lcg(seed, count):
+    """Deterministic pseudo-random numbers in [0, 1)."""
+    out = []
+    s = seed & 0xFFFFFFFF
+    for _ in range(count):
+        s = (1664525 * s + 1013904223) & 0xFFFFFFFF
+        out.append(s / 4294967296.0)
+    return out
+
+# ---------------------------------------------------------------------------
+# Palette
+# ---------------------------------------------------------------------------
+INK = (10, 15, 46)        # deep indigo sky top
+SKY_MID = (19, 27, 76)
+WATER = (7, 11, 32)       # dark water bottom
+GOLD = (233, 168, 59)     # body gold
+GOLD_LT = (248, 220, 126) # belly / highlight gold
+GOLD_DK = (168, 110, 18)  # scale lines
+FLAME = (232, 93, 26)     # mane flame orange
+EMBER = (242, 169, 59)
+DRAGON_DK = (23, 18, 51)  # dragon silhouette
+MOON = (246, 196, 69)
+MOON_DK = (232, 163, 31)
+FOAM = (234, 242, 255)
+EYE = (255, 243, 196)
+
+WATERLINE = 800.0
+MOON_C = (690.0, 290.0)
+MOON_R = 215.0
+
+
+def draw_sky(c):
+    c.vgrad(
+        [
+            (0, INK),
+            (480, SKY_MID),
+            (WATERLINE, (11, 16, 48)),
+            (SIZE, WATER),
+        ]
+    )
+    # stars: fixed LCG positions, kept clear of the moon disc
+    rnd = lcg(20261117, 260)
+    for i in range(86):
+        x = rnd[i * 3] * SIZE
+        y = rnd[i * 3 + 1] * 690.0
+        r = 0.8 + rnd[i * 3 + 2] * 1.8
+        dx, dy = x - MOON_C[0], y - MOON_C[1]
+        if dx * dx + dy * dy < (MOON_R + 34) ** 2:
+            continue
+        a = 0.30 + 0.55 * rnd[(i * 7 + 5) % 260]
+        c.disc(x, y, r, (207, 224, 255), a)
+
+
+def draw_moon(c):
+    # the halo itself is added in the post pass (smooth radial glow);
+    # here only the flat disc, a few quiet craters and a bright upper rim
+    c.disc(MOON_C[0], MOON_C[1], MOON_R, MOON, 1.0)
+    for (x, y, r) in [(612, 218, 26), (742, 350, 18), (668, 372, 12), (776, 236, 14)]:
+        c.disc(x, y, r, (226, 156, 30), 0.22)
+    c.arc_stroke(MOON_C[0], MOON_C[1], MOON_R - 4, MOON_R - 4,
+                math.pi * 1.08, math.pi * 1.92, 7, (255, 226, 140), 0.9)
+
+
+def draw_water(c):
+    # moon reflection: short horizontal dashes under the moon
+    rnd = lcg(777, 90)
+    for i in range(26):
+        y = WATERLINE + 14 + rnd[i * 3] * 190
+        wdt = 26 + rnd[i * 3 + 1] * 120
+        x = MOON_C[0] - wdt / 2 + (rnd[i * 3 + 2] - 0.5) * 70
+        a = 0.10 + 0.22 * (1.0 - (y - WATERLINE) / 210.0)
+        c.stroke([(x, y), (x + wdt, y)], 3.0, (246, 196, 69), max(0.0, a))
+    # faint distant ridge line on the horizon
+    c.stroke([(0, WATERLINE), (SIZE, WATERLINE)], 2.0, (30, 40, 92), 0.8)
+
+
+# -- the koi-dragon ---------------------------------------------------------
+# Spine: cubic bezier from the tail in the water up to the head at the moon.
+SPINE = ((165.0, 885.0), (275.0, 655.0), (505.0, 468.0), (722.0, 372.0))
+
+
+def spine_points(n=46):
+    pts = []
+    for i in range(n + 1):
+        t = i / n
+        pt, ang = cubic(*SPINE, t)
+        pts.append((t, pt, ang))
+    return pts
+
+
+def half_width(t):
+    """Body half-width along the spine (design px)."""
+    if t < 0.12:
+        return 13.0 + 90.0 * t
+    if t < 0.45:
+        return 23.8 + 34.0 * (t - 0.12)
+    # gentle taper through the dragon half so the neck stays thick
+    return 35.0 - 11.0 * ((t - 0.45) / 0.55)
+
+
+def body_outline(pts, shrink=0.0):
+    left, right = [], []
+    for t, (x, y), ang in pts:
+        hw = max(2.0, half_width(t) - shrink)
+        nx, ny = -math.sin(ang), math.cos(ang)
+        left.append((x + nx * hw, y + ny * hw))
+        right.append((x - nx * hw, y - ny * hw))
+    return left + right[::-1]
+
+
+def horn(c, base, ctrl, tip, w0, w1, col, steps=16):
+    """A tapered curved horn: a quadratic bezier swept with shrinking width."""
+    left, right = [], []
+    for i in range(steps + 1):
+        t = i / steps
+        mt = 1.0 - t
+        x = mt * mt * base[0] + 2 * mt * t * ctrl[0] + t * t * tip[0]
+        y = mt * mt * base[1] + 2 * mt * t * ctrl[1] + t * t * tip[1]
+        dx = 2 * mt * (ctrl[0] - base[0]) + 2 * t * (tip[0] - ctrl[0])
+        dy = 2 * mt * (ctrl[1] - base[1]) + 2 * t * (tip[1] - ctrl[1])
+        ln = math.hypot(dx, dy) or 1.0
+        nx, ny = -dy / ln, dx / ln
+        w = w0 + (w1 - w0) * t
+        left.append((x + nx * w, y + ny * w))
+        right.append((x - nx * w, y - ny * w))
+    c.poly(left + right[::-1], col)
+
+
+def flame_tuft(c, base, ang, length, width, col, bend=0.0):
+    """A flame-shaped tuft: a tapered, slightly curved triangle from base.
+    bend bows the tip sideways (perpendicular) for a licking-flame look."""
+    dx, dy = math.cos(ang), math.sin(ang)
+    px, py = -dy, dx
+    tip = (base[0] + dx * length + px * bend * length,
+           base[1] + dy * length + py * bend * length)
+    mid = (base[0] + dx * length * 0.55 + px * (width * 0.55 + bend * length * 0.5),
+           base[1] + dy * length * 0.55 + py * (width * 0.55 + bend * length * 0.5))
+    c.poly(
+        [
+            (base[0] + px * width, base[1] + py * width),
+            mid,
+            tip,
+            (base[0] - px * width, base[1] - py * width),
+        ],
+        col,
+    )
+
+
+def draw_koi_dragon(c):
+    pts = spine_points()
+
+    # tail fin: a broad flowing fan sweeping back from the tail base,
+    # two lobes with ray lines, trailing in the leap's wake
+    t0, p0, a0 = pts[0]
+    back = a0 + math.pi
+    def lobe(ang_off, length, spread, col):
+        edge = []
+        for i in range(15):
+            s = i / 14.0
+            bow = math.sin(s * math.pi) * spread
+            edge.append((p0[0] + math.cos(back + ang_off) * length * s
+                         - math.sin(back + ang_off) * bow,
+                         p0[1] + math.sin(back + ang_off) * length * s
+                         + math.cos(back + ang_off) * bow))
+        c.poly([p0] + edge, col, 0.92)
+        # ray lines fanning out inside the lobe
+        for f in (0.35, 0.6, 0.85):
+            ex = p0[0] + math.cos(back + ang_off) * length * f
+            ey = p0[1] + math.sin(back + ang_off) * length * f
+            c.stroke([p0, (ex, ey)], 3.0, GOLD_DK, 0.8)
+        c.stroke(edge, 3.0, (248, 220, 126), 0.7)
+    lobe(0.30, 168, 46, (232, 138, 32))
+    lobe(-0.34, 138, 36, GOLD)
+
+    # body: gold base, then a soft light belly on the lower side
+    c.poly(body_outline(pts), GOLD)
+    inner = []
+    for t, (x, y), ang in pts:
+        hw = half_width(t)
+        nx, ny = -math.sin(ang), math.cos(ang)
+        inner.append((x - nx * hw * 0.35 + nx * 3, y - ny * hw * 0.35 + ny * 3))
+    inner += [(x - (-math.sin(a)) * (half_width(t) * 1.0),
+               y - (math.cos(a)) * (half_width(t) * 1.0)) for t, (x, y), a in pts[::-1]]
+    c.poly(inner, GOLD_LT, 0.45)
+    # moonlit rim along the upper (moon-facing) edge of the body
+    rim = []
+    for t, (x, y), ang in pts:
+        hw = half_width(t)
+        nx, ny = -math.sin(ang), math.cos(ang)
+        rim.append((x - nx * (hw - 1), y - ny * (hw - 1)))
+    c.stroke(rim, 3.0, (255, 232, 160), 0.85)
+
+    # scales on the fish half (t < 0.45): a few large scallop arcs
+    for i in range(0, 13):
+        t = 0.07 + i * 0.03
+        pt, ang = cubic(*SPINE, t)
+        hw = half_width(t)
+        nx, ny = -math.sin(ang), math.cos(ang)
+        for k in (-0.5, 0.05, 0.55):
+            cx = pt[0] + nx * hw * k
+            cy = pt[1] + ny * hw * k
+            c.arc_stroke(cx, cy, 15, 15, ang - 0.4, ang + math.pi + 0.4,
+                         2.6, GOLD_DK, 0.75, steps=14)
+
+    # dorsal fin: a low serrated gold ridge on the upper edge
+    ridge = []
+    for i in range(13):
+        t = 0.08 + i * 0.032
+        pt, ang = cubic(*SPINE, t)
+        hw = half_width(t)
+        nx, ny = -math.sin(ang), math.cos(ang)
+        ridge.append((pt[0] - nx * (hw + 3), pt[1] - ny * (hw + 3)))
+        ridge.append((pt[0] - nx * (hw + 15 + 6 * math.sin(i * 2.1)),
+                      pt[1] - ny * (hw + 15 + 6 * math.sin(i * 2.1))))
+    c.poly(ridge, (232, 138, 32), 0.95)
+
+    # mane: large layered flames streaming back along the upper edge,
+    # growing out of the dorsal ridge as the fish becomes a dragon
+    for i, t in enumerate((0.52, 0.60, 0.68, 0.76, 0.84, 0.92)):
+        pt, ang = cubic(*SPINE, t)
+        hw = half_width(t)
+        nx, ny = -math.sin(ang), math.cos(ang)
+        base = (pt[0] - nx * (hw - 2), pt[1] - ny * (hw - 2))
+        a = ang + math.pi + 0.15
+        ln = 74 - 5 * i
+        flame_tuft(c, base, a, ln, 18, FLAME if i % 2 == 0 else EMBER,
+                   bend=0.6)
+        flame_tuft(c, base, a, ln * 0.62, 10, GOLD_LT, bend=0.6)
+
+    # pectoral fin near the transition, swept back
+    pt, ang = cubic(*SPINE, 0.48)
+    hw = half_width(0.48)
+    nx, ny = -math.sin(ang), math.cos(ang)
+    base = (pt[0] - nx * hw, pt[1] - ny * hw)
+    c.poly(
+        [base,
+         (base[0] - 52, base[1] + 44),
+         (base[0] - 30, base[1] + 52),
+         (base[0] - 6, base[1] + 18)],
+        (232, 138, 32), 0.95,
+    )
+
+    # ---- head: a large dark dragon head against the moon, gold rim ----
+    # Upper jaw, lower jaw, open mouth, horns, frill, streaming whiskers.
+    head_base, head_ang = cubic(*SPINE, 1.0)
+    hx, hy = head_base
+    # upper jaw: crown -> brow -> nose bridge -> hooked nose tip -> lip
+    c.poly([(hx - 20, hy - 72), (hx + 28, hy - 94), (hx + 92, hy - 76),
+            (hx + 112, hy - 58), (hx + 88, hy - 44), (hx + 40, hy - 38),
+            (hx + 4, hy - 20)], DRAGON_DK)
+    # lower jaw: hinge -> chin, hanging open below the upper jaw
+    c.poly([(hx + 4, hy - 20), (hx + 52, hy - 28), (hx + 84, hy - 34),
+            (hx + 58, hy - 10), (hx + 10, hy + 4), (hx - 16, hy - 8)],
+           (35, 28, 70))
+    # gold rim light along the nose bridge and crown
+    c.stroke([(hx - 20, hy - 72), (hx + 28, hy - 94), (hx + 92, hy - 76),
+              (hx + 112, hy - 58)], 4.0, GOLD_LT, 0.95)
+    # horns: thick tapered curves sweeping back from the crown
+    horn(c, (hx - 12, hy - 70), (hx - 66, hy - 128), (hx - 132, hy - 142),
+         13, 3, GOLD)
+    horn(c, (hx + 2, hy - 78), (hx - 42, hy - 138), (hx - 92, hy - 166),
+         10, 2.5, GOLD_LT)
+    # frill: three spikes behind the jaw
+    for k, (ang, ln) in enumerate(((2.6, 34), (2.85, 42), (3.1, 30))):
+        flame_tuft(c, (hx - 18, hy - 6), ang, ln, 8,
+                   DRAGON_DK if k % 2 == 0 else (35, 28, 70), bend=0.25)
+    # whiskers trailing back from the snout, streaming with the leap
+    c.stroke([(hx + 100, hy - 52), (hx + 62, hy - 8), (hx + 12, hy + 16),
+              (hx - 46, hy + 12)], 3.0, GOLD_LT, 0.9)
+    c.stroke([(hx + 94, hy - 42), (hx + 64, hy + 2), (hx + 26, hy + 24)],
+             2.5, GOLD, 0.85)
+    # the eye: big and bright, almond with a vertical slit pupil
+    ex, ey = hx + 40, hy - 60
+    c.ellipse(ex, ey, 18, 11, EYE)
+    c.ellipse(ex, ey, 6, 10, (26, 18, 6))
+    c.disc(ex - 5, ey - 4, 3.2, (255, 255, 255), 0.95)
+    # brow ridge over the eye
+    c.stroke([(hx + 16, hy - 76), (hx + 40, hy - 78), (hx + 62, hy - 70)],
+             3.5, GOLD_LT, 0.9)
+    # mouth flame: a clear jet from the open jaw
+    flame_tuft(c, (hx + 72, hy - 32), math.pi * 0.22, 52, 13, FLAME, bend=0.2)
+    flame_tuft(c, (hx + 72, hy - 32), math.pi * 0.22, 32, 8, GOLD_LT, bend=0.2)
+    flame_tuft(c, (hx + 70, hy - 26), math.pi * 0.30, 26, 7, GOLD_LT, bend=0.2)
+
+
+def draw_splash(c):
+    # where the spine crosses the waterline
+    sx, sy = 200.0, WATERLINE
+    # foam ring where the body breaks the surface
+    c.arc_stroke(sx, sy, 74, 15, math.pi, 2 * math.pi, 6, FOAM, 0.95, steps=36)
+    c.arc_stroke(sx, sy, 74, 15, 0, math.pi, 4, FOAM, 0.35, steps=36)
+    # droplet crown: round-headed droplets fanning up from the crossing
+    for i, (ang, ln, sz) in enumerate([
+        (-2.75, 62, 13), (-2.35, 88, 16), (-1.95, 104, 19),
+        (-1.57, 92, 15), (-1.18, 80, 16), (-0.75, 58, 12),
+        (-0.35, 38, 10),
+    ]):
+        bx, by = sx + math.cos(ang) * 18, sy + math.sin(ang) * 10
+        tipx, tipy = bx + math.cos(ang) * ln, by + math.sin(ang) * ln
+        c.stroke([(bx, by), (tipx, tipy)], sz * 0.9,
+                 FOAM if i % 2 == 0 else GOLD_LT, 0.95)
+        c.disc(tipx, tipy, sz * 0.62, FOAM if i % 2 == 0 else GOLD_LT, 0.95)
+    # spray arcs above the crown
+    c.arc_stroke(sx - 30, sy - 66, 46, 30, math.pi * 1.15, math.pi * 1.85,
+                 2.5, FOAM, 0.6, steps=24)
+    c.arc_stroke(sx + 34, sy - 52, 36, 24, math.pi * 1.1, math.pi * 1.8,
+                 2.0, FOAM, 0.5, steps=24)
+    # expanding ripples on the water
+    for rx, ry, a in [(98, 13, 0.75), (138, 19, 0.5), (182, 25, 0.32)]:
+        c.arc_stroke(sx, sy, rx, ry, 0, math.pi, 3.0, (246, 220, 140), a,
+                     steps=40)
+
+
+def draw_sparks(c):
+    # gold spark diamonds along the leap arc and near the head
+    rnd = lcg(4242, 60)
+    for i in range(14):
+        t = 0.15 + rnd[i * 2] * 0.75
+        pt, ang = cubic(*SPINE, t)
+        hw = half_width(t)
+        side = 1 if rnd[i * 2 + 1] > 0.5 else -1
+        off = hw + 16 + rnd[(i * 3 + 1) % 60] * 46
+        nx, ny = -math.sin(ang), math.cos(ang)
+        x, y = pt[0] + nx * off * side, pt[1] + ny * off * side
+        s = 3.5 + rnd[(i * 5 + 2) % 60] * 5.5
+        c.poly([(x, y - s), (x + s * 0.36, y), (x, y + s),
+                (x - s * 0.36, y)], GOLD_LT, 0.9)
+
+
+# ---------------------------------------------------------------------------
+# Post pass at output resolution: glows, vignette, downsample
+# ---------------------------------------------------------------------------
+
+def downsample(src, size=SIZE):
+    """Box-average the 2x buffer down to size x size RGB bytes."""
+    out = bytearray(size * size * 3)
+    for y in range(size):
+        for x in range(size):
+            r = g = b = 0
+            for dy in (0, 1):
+                base = ((2 * y + dy) * W + 2 * x) * 3
+                for dx in (0, 1):
+                    o = base + dx * 3
+                    r += src[o]
+                    g += src[o + 1]
+                    b += src[o + 2]
+            o = (y * size + x) * 3
+            out[o] = (r + 2) >> 2
+            out[o + 1] = (g + 2) >> 2
+            out[o + 2] = (b + 2) >> 2
+    return out
+
+
+def glow(rgb, size, cx, cy, radius, col, peak):
+    """Additive radial glow, strongest at the centre."""
+    x0 = max(0, int(cx - radius))
+    x1 = min(size - 1, int(cx + radius))
+    y0 = max(0, int(cy - radius))
+    y1 = min(size - 1, int(cy + radius))
+    for y in range(y0, y1 + 1):
+        for x in range(x0, x1 + 1):
+            d = math.hypot(x - cx, y - cy) / radius
+            if d >= 1.0:
+                continue
+            a = peak * (1.0 - d) * (1.0 - d)
+            o = (y * size + x) * 3
+            rgb[o] = min(255, int(rgb[o] + col[0] * a))
+            rgb[o + 1] = min(255, int(rgb[o + 1] + col[1] * a))
+            rgb[o + 2] = min(255, int(rgb[o + 2] + col[2] * a))
+
+
+def vignette(rgb, size, strength=0.16):
+    cx = cy = size / 2.0
+    maxd = math.hypot(cx, cy)
+    for y in range(size):
+        for x in range(size):
+            d = math.hypot(x - cx, y - cy) / maxd
+            if d <= 0.62:
+                continue
+            f = 1.0 - strength * ((d - 0.62) / 0.38) ** 2
+            o = (y * size + x) * 3
+            rgb[o] = int(rgb[o] * f)
+            rgb[o + 1] = int(rgb[o + 1] * f)
+            rgb[o + 2] = int(rgb[o + 2] * f)
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def render():
+    c = Canvas()
+    draw_sky(c)
+    draw_moon(c)
+    draw_water(c)
+    draw_koi_dragon(c)
+    draw_splash(c)
+    draw_sparks(c)
+    rgb = downsample(c.buf)
+    # glow pass: moon halo, the dragon's eye, the mouth flame
+    glow(rgb, SIZE, MOON_C[0], MOON_C[1], 345, (246, 196, 69), 0.38)
+    hx, hy = cubic(*SPINE, 1.0)[0]
+    glow(rgb, SIZE, hx + 40, hy - 60, 62, (255, 230, 150), 0.7)
+    glow(rgb, SIZE, hx + 72, hy - 32, 44, (232, 120, 40), 0.45)
+    vignette(rgb, SIZE)
+    return bytes(rgb)
 
 
 def main():
-    out_dir = os.environ.get("MAKEFUN_OUTPUT_DIR") or "/output"
-    os.makedirs(out_dir, exist_ok=True)
-    cv = draw_scene()
-    n = write_png(cv, os.path.join(out_dir, "entry.png"))
-    print(f"wrote entry.png ({n} bytes, {W}x{H})")
+    out_path = os.environ.get("OUT", "/output/entry.png")
+    png = encode_png(render(), SIZE, SIZE)
+    parent = os.path.dirname(out_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(out_path, "wb") as fh:
+        fh.write(png)
 
 
 if __name__ == "__main__":
