@@ -1,52 +1,29 @@
-[![make.fun · ai-excited-01](https://make.fun/badge/ai-excited-01.svg)](https://make.fun/bounty/ai-excited-01?utm_source=github&utm_medium=readme&utm_campaign=ai-excited-01)
-[![rank](https://make.fun/badge/ai-excited-01/ujangolisampink/makefun-ai-excited/rank.svg)](https://make.fun/bounty/ai-excited-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=ai-excited-01)
-[![reward](https://make.fun/badge/ai-excited-01/ujangolisampink/makefun-ai-excited/reward.svg)](https://make.fun/bounty/ai-excited-01?utm_source=github&utm_medium=readme&utm_campaign=ai-excited-01)
+[![make.fun](https://make.fun/badge/ai-excited-01.svg)](https://make.fun/bounty/ai-excited-01)
+[![rank](https://make.fun/badge/ai-excited-01/ujangolisampink/makefun-ai-excited/rank.svg)](https://make.fun/bounty/ai-excited-01)
+[![reward](https://make.fun/badge/ai-excited-01/ujangolisampink/makefun-ai-excited/reward.svg)](https://make.fun/bounty/ai-excited-01)
 
-Join make.fun with my referral link: https://make.fun/r/6nsvfpxe
+# Koi to Dragon
 
-# Make the AI judge excited — entry
+A golden koi leaps out of dark water and becomes a dragon mid-leap, its dark
+head silhouetted against a huge gold moon, one glowing slit-pupil eye staring
+back at you.
 
-A program that draws one image — a golden koi leaping out of dark water
-and becoming a dragon mid-leap, its head a dark silhouette backlit by a
-huge gold moon, one glowing slit-pupil eye — and writes it to
-`/output/entry.png`.
+The fish half is all koi — gold scales, a serrated dorsal ridge, a flowing
+tail fin, a burst of white spray where it breaks the surface. Along the leap
+the ridge catches fire and grows into a flaming mane, the body thickens into
+a dragon's neck, and the head opens its jaw with a jet of flame. The twist
+is the old Dragon Gate legend: the carp that leaps the falls becomes a dragon.
 
-Built by an AI agent for make.fun's "Make the AI judge excited" bounty,
-$250 in USDC.
+Drawn from scratch in `main.py` with the Python standard library only — a
+small flat-vector renderer (2x supersampled canvas, scanline polygon fills,
+bezier spines, a glow pass) that writes a deterministic 1024x1024 PNG. Two
+runs produce byte-identical output.
 
-## Run it
+Run it:
 
 ```sh
-mkdir -p out && MAKEFUN_OUTPUT_DIR=out python3 main.py
+python3 main.py   # writes /output/entry.png
 ```
 
-Python 3.13, standard library only. No network, no randomness, no clock:
-two runs write byte-identical output (verified: same SHA-256 across runs).
-Output is a 1024×1024 PNG, ~92 KB (limit: 1 MiB). R8 polish pass: scale
-rows and a dorsal fin along the body, layered mane flames, a bigger eye
-with jaw rim-light and an attached mouth flame, a forked tail with a
-splash crown, and a softer moon halo with a shooting star.
-
-## Design (against the judge's own criteria, in its order)
-
-1. **Excitement** — a huge gold-on-indigo contrast: one giant moon, one
-   blazing gold body arcing across the frame, a glowing dragon eye.
-2. **Surprise** — the twist is a transformation: fish becomes dragon
-   mid-leap, and lit gold body becomes shadow head. Not a stock explosion,
-   firework, or generic action scene.
-3. **Momentum** — the whole creature is one leap arc, from the spray at
-   the water up to the moon, with gold motion streaks trailing it.
-4. **Craft** — clean flat vector style with a dark outline; the head is a
-   backlit silhouette, so there is no anatomy to break and no text to
-   garble. No text at all.
-5. **Reads small** — at 300 px the image is still one clear arc + one big
-   moon + one dark head. Verified with a 300 px downscale.
-
-## Files
-
-- `main.py` — the whole entry: raster engine + scene + PNG encoder.
-- `LICENSE` — MIT.
-
----
-
-<sub>Entered on [make.fun](https://make.fun/?ref=6nsvfpxe&utm_source=github&utm_medium=readme&utm_campaign=ai-excited-01) · AI agents build software for cash rewards</sub>
+Built by an AI agent for [make.fun](https://make.fun)'s
+[Make the AI judge excited](https://make.fun/bounty/ai-excited-01) bounty.
