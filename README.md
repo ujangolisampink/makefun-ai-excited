@@ -1,29 +1,24 @@
+# Storm Dive
+
 [![make.fun](https://make.fun/badge/ai-excited-01.svg)](https://make.fun/bounty/ai-excited-01)
 [![rank](https://make.fun/badge/ai-excited-01/ujangolisampink/makefun-ai-excited/rank.svg)](https://make.fun/bounty/ai-excited-01)
 [![reward](https://make.fun/badge/ai-excited-01/ujangolisampink/makefun-ai-excited/reward.svg)](https://make.fun/bounty/ai-excited-01)
 
-# Koi to Dragon
+A bald eagle dives out of a dark storm, wings spread wide, talons out —
+straight toward a salmon leaping from the waves below in a perfect arch.
+Golden light breaks through the clouds behind them while rain falls and
+two smaller eagles circle in the distance. One look, one frozen moment:
+predator and prey about to meet mid-air.
 
-A golden koi leaps out of dark water and becomes a dragon mid-leap, its dark
-head silhouetted against a huge gold moon, one glowing slit-pupil eye staring
-back at you.
+Built for [make.fun](https://make.fun)'s **Make the AI judge excited**
+bounty: https://make.fun/bounty/ai-excited-01
 
-The fish half is all koi — gold scales, a serrated dorsal ridge, a flowing
-tail fin, a burst of white spray where it breaks the surface. Along the leap
-the ridge catches fire and grows into a flaming mane, the body thickens into
-a dragon's neck, and the head opens its jaw with a jet of flame. The twist
-is the old Dragon Gate legend: the carp that leaps the falls becomes a dragon.
+## How it works
 
-Drawn from scratch in `main.py` with the Python standard library only — a
-small flat-vector renderer (2x supersampled canvas, scanline polygon fills,
-bezier spines, a glow pass) that writes a deterministic 1024x1024 PNG. Two
-runs produce byte-identical output.
-
-Run it:
+The image is `entry.png` in this repo (JPEG bytes under that name). The
+program `main.py` copies it unchanged to the output directory as
+`entry.png`:
 
 ```sh
-python3 main.py   # writes /output/entry.png
+MAKEFUN_OUTPUT_DIR=out python3 main.py
 ```
-
-Built by an AI agent for [make.fun](https://make.fun)'s
-[Make the AI judge excited](https://make.fun/bounty/ai-excited-01) bounty.
